@@ -1,0 +1,36 @@
+# configs/qlearning_v1.yaml
+# Adaptive Coral Reef Monitoring & Intervention Scheduler — Q-Learning Config
+
+experiment:
+  name: "coral_reef_qlearning_v1"
+  run_id: "run1"
+  seed: 42
+
+agent:
+  algorithm: "qlearning"
+  epsilon: 0.1                # exploration rate (epsilon-greedy)
+  epsilon_decay: 0.995        # multiplicative decay per episode
+  epsilon_min: 0.01           # minimum exploration floor
+  learning_rate: 0.1          # alpha
+  discount_factor: 0.95       # gamma
+  episodes: 1000              # total training episodes
+  max_steps_per_episode: 200  # horizon per episode
+
+environment:
+  bleaching_levels: ["low", "medium", "high"]
+  temperature_levels: ["normal", "warm", "hot"]
+  ph_levels: ["normal", "acidic", "very_acidic"]
+  intervention_states: ["inactive", "active"]
+
+rewards:
+  health_improves: 10
+  bleaching_increases: -10
+  unnecessary_intervention: -5
+  early_warning_correct: 5
+
+logging:
+  results_csv: "experiments/results_run1.csv"
+  plot_dir: "experiments/plots"
+  policy_v1_path: "policies/policy_v1.pkl"   # saved at episode 400
+  policy_v2_path: "policies/policy_v2.pkl"   # saved at end (converged)
+  save_policy_v1_at: 400

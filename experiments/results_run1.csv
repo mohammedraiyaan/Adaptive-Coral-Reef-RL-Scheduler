@@ -1,0 +1,3 @@
+run_id,episodes,avg_reward,avg_coral_health,epsilon,learning_rate,interventions_deployed
+run1_63d5c9,1000,46.1,0.6422,0.01,0.1,2884
+run1_54492b,1000,46.1,0.6422,0.01,0.1,2884

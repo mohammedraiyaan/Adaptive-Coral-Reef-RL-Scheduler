@@ -1,0 +1,65 @@
+{
+    "metadata": {
+        "run_id": "run1_d738c8"
+    },
+    "metrics": {
+        "run_id": "run1_d738c8",
+        "episodes": 1000,
+        "avg_reward": 46.1,
+        "avg_coral_health": 0.6422,
+        "epsilon": 0.01,
+        "learning_rate": 0.1,
+        "interventions_deployed": 2884
+    },
+    "parameters": {
+        "experiment": {
+            "name": "coral_reef_qlearning_v1",
+            "run_id": "run1",
+            "seed": 42
+        },
+        "agent": {
+            "algorithm": "qlearning",
+            "epsilon": 0.1,
+            "epsilon_decay": 0.995,
+            "epsilon_min": 0.01,
+            "learning_rate": 0.1,
+            "discount_factor": 0.95,
+            "episodes": 1000,
+            "max_steps_per_episode": 200
+        },
+        "environment": {
+            "bleaching_levels": [
+                "low",
+                "medium",
+                "high"
+            ],
+            "temperature_levels": [
+                "normal",
+                "warm",
+                "hot"
+            ],
+            "ph_levels": [
+                "normal",
+                "acidic",
+                "very_acidic"
+            ],
+            "intervention_states": [
+                "inactive",
+                "active"
+            ]
+        },
+        "rewards": {
+            "health_improves": 10,
+            "bleaching_increases": -10,
+            "unnecessary_intervention": -5,
+            "early_warning_correct": 5
+        },
+        "logging": {
+            "results_csv": "experiments/results_run1.csv",
+            "plot_dir": "experiments/plots",
+            "policy_v1_path": "policies/policy_v1.pkl",
+            "policy_v2_path": "policies/policy_v2.pkl",
+            "save_policy_v1_at": 400
+        }
+    }
+}
