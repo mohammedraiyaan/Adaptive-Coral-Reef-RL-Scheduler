@@ -126,22 +126,33 @@ Epsilon-greedy with exponential decay:
 
 ---
 
-## MLOps Tracking
+## MLOps Tracking & Hyperparameter Tuning
 
-Every training run automatically generates a per-run tracking log (e.g., `results_x.csv` and `log_x.json`) storing all critical experiment metadata.
+We have fully integrated **MLflow** for comprehensive experiment tracking, artifact management, and **Optuna** for automated hyperparameter tuning.
 
-The generated logs include:
-- `run_id`
-- `episodes`
-- `average reward`
-- `average coral health` (acting as the ecosystem equivalent of wait-time)
-- `parameters` (ε, learning rate, and all environment configs)
+### Single Run Tracking
+Every training run automatically generates an MLflow record storing all critical experiment metadata. Run training normally:
+```bash
+python train.py --config configs/qlearning_v1.yaml
+```
+MLflow will log:
+- **Parameters**: ε, learning rate, discount factor, and environment configs.
+- **Metrics**: `avg_reward` and `avg_coral_health` for both the RL agent and fixed-timer baseline.
+- **Artifacts**: Policy checkpoints (`.pkl` files), configuration YAML, and generated plots.
 
-Example Output: `experiments/log_run1_abc123.json` and `experiments/results_run1_abc123.csv`
+### Hyperparameter Tuning
+To systematically find the best agent configuration (learning rate, discount factor, epsilon decay), run the automated tuning script:
+```bash
+python tune.py --config configs/qlearning_v1.yaml --trials 20
+```
+This uses Optuna to optimize the `avg_reward`. Each trial is logged as a nested run in MLflow under a parent sweep run. Best hyperparameters and optimization plots (if supported) are saved to the parent run.
 
-Policies are versioned as `.pkl` files:
-- **policy_v1.pkl** — early training (episode 400), useful for ablation
-- **policy_v2.pkl** — converged policy, recommended for deployment
+### Viewing the MLflow UI
+To view your runs, compare metrics, and download artifacts (policies/plots), start the MLflow tracking server locally:
+```bash
+mlflow ui
+```
+Then, open [http://127.0.0.1:5000](http://127.0.0.1:5000) in your browser.
 
 ---
 

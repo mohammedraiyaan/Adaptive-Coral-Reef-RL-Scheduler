@@ -6,10 +6,10 @@ experiment:
 agent:
   algorithm: "qlearning"
   epsilon: 0.2
-  epsilon_decay: 0.9926012174928935
+  epsilon_decay: 0.995
   epsilon_min: 0.01
-  learning_rate: 0.07591881405823306
-  discount_factor: 0.922359467400067
+  learning_rate: 0.2
+  discount_factor: 0.95
   episodes: 1000
   max_steps_per_episode: 200
 

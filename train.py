@@ -33,6 +33,7 @@ from pathlib import Path
 
 import numpy as np
 import yaml
+import mlflow
 
 from sim.environment import CoralReefEnv, N_STATES, N_ACTIONS, ACTIONS
 
@@ -425,39 +426,72 @@ def main():
     print(f"  config:   {args.config}")
     print(f"{'='*60}\n")
 
-    # 1. Fixed-timer baseline (evaluated first, independent)
-    print("[1/4] Evaluating fixed-timer baseline (200 episodes)…")
-    fixed_results = run_fixed_timer(cfg, episodes=200)
-    print(f"      Fixed avg reward: {fixed_results['avg_reward']:.2f}  "
-          f"health: {fixed_results['avg_health']:.2f}%")
+    mlflow.set_experiment(cfg.get("name", "coral_reef_qlearning"))
+    with mlflow.start_run(run_name=f"run_{cfg['run_id']}_{run_hash[:8]}") as run:
+        mlflow.log_params({
+            "episodes": cfg.get("episodes"),
+            "learning_rate": cfg.get("learning_rate"),
+            "discount_factor": cfg.get("discount_factor"),
+            "epsilon_start": cfg.get("epsilon"),
+            "epsilon_decay": cfg.get("epsilon_decay"),
+            "stress_factor": cfg.get("stress_factor"),
+            "seed": cfg.get("seed"),
+            "algorithm": cfg.get("algorithm")
+        })
 
-    # 2. Train Q-learning
-    print(f"\n[2/4] Training Q-learning agent ({cfg['episodes']} episodes)…")
-    t0 = time.time()
-    rl_results = train_qlearning(cfg)
-    elapsed = time.time() - t0
-    print(f"      Done in {elapsed:.1f}s  |  "
-          f"RL avg reward (last 200): {rl_results['avg_reward']:.2f}  "
-          f"health: {rl_results['avg_health']:.2f}%")
+        # 1. Fixed-timer baseline (evaluated first, independent)
+        print("[1/4] Evaluating fixed-timer baseline (200 episodes)…")
+        fixed_results = run_fixed_timer(cfg, episodes=200)
+        print(f"      Fixed avg reward: {fixed_results['avg_reward']:.2f}  "
+              f"health: {fixed_results['avg_health']:.2f}%")
 
-    # 3. Save converged policy
-    print("\n[3/4] Saving policies…")
-    final_meta = {"episode": cfg["episodes"], "run_hash": run_hash, "config": cfg}
-    save_policy(rl_results["q_table"], cfg["policy_v2_path"], final_meta)
+        # 2. Train Q-learning
+        print(f"\n[2/4] Training Q-learning agent ({cfg['episodes']} episodes)…")
+        t0 = time.time()
+        rl_results = train_qlearning(cfg)
+        elapsed = time.time() - t0
+        print(f"      Done in {elapsed:.1f}s  |  "
+              f"RL avg reward (last 200): {rl_results['avg_reward']:.2f}  "
+              f"health: {rl_results['avg_health']:.2f}%")
 
-    # 4. Plots & MLOps log
-    print("\n[4/4] Generating plots and MLOps log…")
-    make_plots(rl_results, fixed_results, cfg)
-    log_results(cfg, rl_results, fixed_results, run_hash, elapsed)
+        # 3. Save converged policy
+        print("\n[3/4] Saving policies…")
+        final_meta = {"episode": cfg["episodes"], "run_hash": run_hash, "config": cfg}
+        save_policy(rl_results["q_table"], cfg["policy_v2_path"], final_meta)
 
-    # Print comparison table
-    print_comparison_table(rl_results, fixed_results)
+        # 4. Plots & MLOps log
+        print("\n[4/4] Generating plots and MLOps log…")
+        make_plots(rl_results, fixed_results, cfg)
+        log_results(cfg, rl_results, fixed_results, run_hash, elapsed)
 
-    print("✓ Training complete.\n")
-    print(f"  Plots   → {cfg['plots_dir']}/")
-    print(f"  Policies→ policies/policy_v1.pkl  (ep {cfg['save_policy_v1_at']})")
-    print(f"           policies/policy_v2.pkl  (converged)")
-    print(f"  MLOps   → {cfg['results_dir']}/results_{cfg['run_id']}.csv\n")
+        # Print comparison table
+        print_comparison_table(rl_results, fixed_results)
+
+        # Log metrics to MLflow
+        mlflow.log_metrics({
+            "rl_avg_reward": rl_results['avg_reward'],
+            "rl_avg_health": rl_results['avg_health'],
+            "fixed_avg_reward": fixed_results['avg_reward'],
+            "fixed_avg_health": fixed_results['avg_health'],
+        })
+        
+        # Log artifacts to MLflow
+        for p in [cfg["policy_v1_path"], cfg["policy_v2_path"], args.config]:
+            if os.path.exists(p):
+                mlflow.log_artifact(p)
+        
+        plots = ["reward_curve.png", "coral_health_curve.png", "comparison_bar.png", "action_distribution.png"]
+        for p in plots:
+            plot_path = os.path.join(cfg["plots_dir"], p)
+            if os.path.exists(plot_path):
+                mlflow.log_artifact(plot_path)
+
+        print("✓ Training complete.\n")
+        print(f"  Plots   → {cfg['plots_dir']}/")
+        print(f"  Policies→ policies/policy_v1.pkl  (ep {cfg['save_policy_v1_at']})")
+        print(f"           policies/policy_v2.pkl  (converged)")
+        print(f"  MLOps   → {cfg['results_dir']}/results_{cfg['run_id']}.csv\n")
+        print(f"  MLflow  → Run ID: {run.info.run_id}\n")
 
 
 if __name__ == "__main__":
