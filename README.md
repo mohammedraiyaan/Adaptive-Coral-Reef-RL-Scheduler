@@ -61,6 +61,9 @@ python evaluate.py --policy policies/policy_v2.pkl --episodes 200 --compare
 
 # Evaluate early-training snapshot
 python evaluate.py --policy policies/policy_v1.pkl --episodes 200 --compare
+
+# Run stress-factor sensitivity sweep
+python evaluate.py --policy policies/policy_v2.pkl --sensitivity
 ```
 
 ---

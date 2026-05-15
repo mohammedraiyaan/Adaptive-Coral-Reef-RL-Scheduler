@@ -1,2 +1,2 @@
 run_hash,run_id,timestamp,elapsed_s,episodes,learning_rate,discount_factor,epsilon_start,epsilon_min,epsilon_decay,stress_factor,seed,rl_avg_reward_last200,rl_std_reward_last200,rl_avg_health_last200,rl_std_health_last200,fixed_avg_reward,fixed_std_reward,fixed_avg_health,fixed_std_health,reward_delta,health_delta
-ce41245ba25042bc94b479954df5c566,run1,2026-05-15T10:40:43,9.66,1000,0.1,0.95,0.1,0.01,0.995,1.0,42,886.585,74.534,59.5,18.131,38.395,26.672,40.35,17.589,848.19,19.15
+5cbfe57b420043dabd0a03fca88c6972,run2,2026-05-15T21:12:49,3.07,1000,0.2,0.95,0.2,0.01,0.995,1.0,42,965.3,57.049,62.5,13.702,199.52,84.696,55.9,13.791,765.78,6.6

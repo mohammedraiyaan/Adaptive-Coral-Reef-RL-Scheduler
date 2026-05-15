@@ -1,0 +1,71 @@
+{
+  "config": {
+    "name": "coral_reef_qlearning_v1",
+    "run_id": "run1",
+    "seed": 42,
+    "algorithm": "qlearning",
+    "epsilon": 0.1,
+    "epsilon_decay": 0.995,
+    "epsilon_min": 0.01,
+    "learning_rate": 0.1,
+    "discount_factor": 0.95,
+    "episodes": 1000,
+    "max_steps_per_episode": 200,
+    "bleaching_levels": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "temperature_levels": [
+      "normal",
+      "warm",
+      "hot"
+    ],
+    "ph_levels": [
+      "normal",
+      "acidic",
+      "very_acidic"
+    ],
+    "intervention_states": [
+      "inactive",
+      "active"
+    ],
+    "health_improves": 10,
+    "bleaching_increases": -10,
+    "unnecessary_intervention": -5,
+    "early_warning_correct": 5,
+    "results_csv": "experiments/results_run1.csv",
+    "plot_dir": "experiments/plots",
+    "policy_v1_path": "policies/policy_v1.pkl",
+    "policy_v2_path": "policies/policy_v2.pkl",
+    "save_policy_v1_at": 400,
+    "plots_dir": "experiments/plots",
+    "results_dir": "experiments",
+    "stress_factor": 1.0,
+    "fixed_timer_interval": 10
+  },
+  "metrics": {
+    "run_hash": "ce41245ba25042bc94b479954df5c566",
+    "run_id": "run1",
+    "timestamp": "2026-05-15T10:40:43",
+    "elapsed_s": 9.66,
+    "episodes": 1000,
+    "learning_rate": 0.1,
+    "discount_factor": 0.95,
+    "epsilon_start": 0.1,
+    "epsilon_min": 0.01,
+    "epsilon_decay": 0.995,
+    "stress_factor": 1.0,
+    "seed": 42,
+    "rl_avg_reward_last200": 886.585,
+    "rl_std_reward_last200": 74.534,
+    "rl_avg_health_last200": 59.5,
+    "rl_std_health_last200": 18.131,
+    "fixed_avg_reward": 38.395,
+    "fixed_std_reward": 26.672,
+    "fixed_avg_health": 40.35,
+    "fixed_std_health": 17.589,
+    "reward_delta": 848.19,
+    "health_delta": 19.15
+  }
+}

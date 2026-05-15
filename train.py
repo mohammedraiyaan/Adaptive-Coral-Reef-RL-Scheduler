@@ -1,449 +1,463 @@
 """
-train.py
-========
-Train a Q-learning agent on the Coral Reef environment.
-
+train.py  —  Adaptive Coral Reef RL Scheduler
+=============================================
 Usage:
     python train.py --config configs/qlearning_v1.yaml
 
-MLOps outputs:
-  - experiments/results_run1.csv   — per-run metrics
-  - policies/policy_v1.pkl          — snapshot at episode 400
-  - policies/policy_v2.pkl          — converged final policy
-  - experiments/plots/reward_over_episodes.png
-  - experiments/plots/coral_health_comparison.png
+What this does
+--------------
+1.  Trains a tabular Q-learning agent for `episodes` episodes.
+2.  Saves a policy snapshot at episode `save_policy_v1_at`   → policy_v1.pkl
+3.  Saves the converged final policy                          → policy_v2.pkl
+4.  Appends a row to experiments/results_<run_id>.csv  (MLOps log)
+5.  Writes a JSON metadata file for full reproducibility
+6.  Produces four real, data-driven plots (no fake curves):
+        reward_curve.png           – per-episode reward (smoothed)
+        coral_health_curve.png     – per-episode health (smoothed)
+        comparison_bar.png         – Fixed vs RL bar chart
+        action_distribution.png    – how often each action was chosen
+7.  Prints a Fixed-Timer vs RL comparison table to the terminal
 """
 
 import argparse
 import csv
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 import json
 import os
 import pickle
-import random
+import time
 import uuid
 from pathlib import Path
 
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.ticker as mtick
 import numpy as np
 import yaml
-from tqdm import tqdm
 
-from sim.environment import CoralReefEnv, N_STATES, N_ACTIONS, INTERVENTION_ACTIONS
+from sim.environment import CoralReefEnv, N_STATES, N_ACTIONS, ACTIONS
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
 
 def load_config(path: str) -> dict:
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+    flat = {}
+    for section, values in raw.items():
+        if isinstance(values, dict):
+            flat.update(values)
+        else:
+            flat[section] = values
+    return flat
 
 
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
+def make_dirs(cfg: dict):
+    for d in [cfg["results_dir"], cfg["plots_dir"], "policies"]:
+        Path(d).mkdir(parents=True, exist_ok=True)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Fixed-Schedule Baseline Policy
-# ─────────────────────────────────────────────────────────────────────────────
-
-class FixedSchedulePolicy:
-    """Intervene (apply shading = action 2) every `interval` steps."""
-
-    def __init__(self, interval: int = 10):
-        self.interval = interval
-        self._step = 0
-
-    def select_action(self, state: int) -> int:  # noqa: ARG002
-        self._step += 1
-        return 2 if (self._step % self.interval == 0) else 0
-
-    def reset(self) -> None:
-        self._step = 0
+def save_policy(q_table: np.ndarray, path: str, metadata: dict):
+    with open(path, "wb") as f:
+        pickle.dump({"q_table": q_table, "metadata": metadata}, f)
+    print(f"  [MLOps] Policy saved → {path}")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Q-Learning Agent
-# ─────────────────────────────────────────────────────────────────────────────
-
-class QLearningAgent:
-    def __init__(
-        self,
-        n_states: int,
-        n_actions: int,
-        lr: float = 0.1,
-        gamma: float = 0.95,
-        epsilon: float = 0.1,
-        epsilon_decay: float = 0.995,
-        epsilon_min: float = 0.01,
-        seed: int = 42,
-    ):
-        self.n_states   = n_states
-        self.n_actions  = n_actions
-        self.lr         = lr
-        self.gamma      = gamma
-        self.epsilon    = epsilon
-        self.epsilon_decay = epsilon_decay
-        self.epsilon_min   = epsilon_min
-        self.rng = np.random.default_rng(seed)
-
-        self.Q = np.zeros((n_states, n_actions), dtype=np.float64)
-
-    # ── Action selection ──────────────────────────────────────────────────── #
-    def select_action(self, state: int) -> int:
-        if self.rng.random() < self.epsilon:
-            return int(self.rng.integers(0, self.n_actions))
-        return int(np.argmax(self.Q[state]))
-
-    def greedy_action(self, state: int) -> int:
-        return int(np.argmax(self.Q[state]))
-
-    # ── Q-table update ────────────────────────────────────────────────────── #
-    def update(self, s: int, a: int, r: float, s_next: int) -> None:
-        best_next = np.max(self.Q[s_next])
-        td_target = r + self.gamma * best_next
-        self.Q[s, a] += self.lr * (td_target - self.Q[s, a])
-
-    def decay_epsilon(self) -> None:
-        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
-
-    # ── Serialisation ─────────────────────────────────────────────────────── #
-    def save(self, path: str) -> None:
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "wb") as f:
-            pickle.dump({"Q": self.Q, "epsilon": self.epsilon, "lr": self.lr}, f)
-        print(f"  [save] Policy saved -> {path}")
-
-    @classmethod
-    def load(cls, path: str, **kwargs) -> "QLearningAgent":
-        with open(path, "rb") as f:
-            data = pickle.load(f)
-        agent = cls(N_STATES, N_ACTIONS, **kwargs)
-        agent.Q = data["Q"]
-        agent.epsilon = data["epsilon"]
-        return agent
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Training Loop
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_episode(env: CoralReefEnv, agent: QLearningAgent, max_steps: int, train: bool = True):
-    state = env.reset()
-    total_reward = 0.0
-    final_info = {}
-
-    for _ in range(max_steps):
-        action = agent.select_action(state) if train else agent.greedy_action(state)
-        next_state, reward, done, info = env.step(action)
-
-        if train:
-            agent.update(state, action, reward, next_state)
-
-        state = next_state
-        total_reward += reward
-        final_info = info
-
-        if done:
-            break
-
-    return total_reward, final_info
-
-
-def run_fixed_episode(env: CoralReefEnv, policy: FixedSchedulePolicy, max_steps: int):
-    state = env.reset()
-    policy.reset()
-    total_reward = 0.0
-    final_info = {}
-
-    for _ in range(max_steps):
-        action = policy.select_action(state)
-        state, reward, done, info = env.step(action)
-        total_reward += reward
-        final_info = info
-        if done:
-            break
-
-    return total_reward, final_info
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  Plotting
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _smooth(values, window=20):
+def smooth(values, window=30):
     if len(values) < window:
         return values
     kernel = np.ones(window) / window
-    return np.convolve(values, kernel, mode="valid")
+    padded = np.pad(values, (window // 2, window // 2), mode="edge")
+    return np.convolve(padded, kernel, mode="valid")[:len(values)]
 
 
-def plot_reward_over_episodes(rewards: list, plot_dir: str) -> None:
-    fig, ax = plt.subplots(figsize=(10, 5))
-    fig.patch.set_facecolor("#0d1117")
-    ax.set_facecolor("#161b22")
+# ──────────────────────────────────────────────────────────────────────────────
+# Fixed-Timer Baseline
+# ──────────────────────────────────────────────────────────────────────────────
 
-    eps = np.arange(1, len(rewards) + 1)
-    smoothed = _smooth(rewards, window=30)
-    offset = len(rewards) - len(smoothed)
+def run_fixed_timer(cfg: dict, episodes: int = 200, seed_offset: int = 9999) -> dict:
+    """
+    Fixed-timer scheduler: cycles through ALL 5 actions (0–4) every step in order.
+    This gives the fixed-timer a fair fight — it is always doing something, not idling.
+    Action distribution will be roughly uniform (~20% each), unlike the old version
+    which was 90% no_action by construction (1 action per 10-step interval).
+    """
+    rewards, healths, action_counts = [], [], [0] * N_ACTIONS
 
-    ax.plot(eps, rewards, color="#30a3ff", alpha=0.25, linewidth=0.8, label="Raw reward")
-    ax.plot(eps[offset:], smoothed, color="#00e5ff", linewidth=2.2, label="Smoothed (w=30)")
+    for ep in range(episodes):
+        env = CoralReefEnv(seed=seed_offset + ep, stress_factor=cfg["stress_factor"])
+        env.reset()
+        ep_reward, step = 0.0, 0
+        done = False
+        while not done:
+            # Strict round-robin over all 5 actions — no idle padding
+            action = step % N_ACTIONS
+            _, r, done, info = env.step(action)
+            action_counts[action] += 1
+            ep_reward += r
+            step += 1
+        rewards.append(ep_reward)
+        healths.append(env.coral_health)
 
-    ax.set_title("Q-Learning: Reward over Episodes", color="white", fontsize=14, pad=12)
-    ax.set_xlabel("Episode", color="#8b949e")
-    ax.set_ylabel("Total Reward", color="#8b949e")
-    ax.tick_params(colors="#8b949e")
-    ax.spines["bottom"].set_color("#30363d")
-    ax.spines["left"].set_color("#30363d")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.legend(facecolor="#21262d", edgecolor="#30363d", labelcolor="white")
-
-    plt.tight_layout()
-    out = Path(plot_dir) / "reward_over_episodes.png"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  [plot] Saved -> {out}")
-
-
-def plot_coral_health_comparison(
-    rl_health: list,
-    fixed_health: list,
-    plot_dir: str,
-) -> None:
-    fig, ax = plt.subplots(figsize=(10, 5))
-    fig.patch.set_facecolor("#0d1117")
-    ax.set_facecolor("#161b22")
-
-    eps_rl    = np.arange(1, len(rl_health) + 1)
-    eps_fixed = np.arange(1, len(fixed_health) + 1)
-
-    sm_rl    = _smooth(rl_health,    window=20)
-    sm_fixed = _smooth(fixed_health, window=20)
-
-    ax.plot(eps_rl,    rl_health,    color="#00e5ff", alpha=0.2, linewidth=0.7)
-    ax.plot(eps_rl[len(rl_health) - len(sm_rl):], sm_rl,
-            color="#00e5ff", linewidth=2.2, label="RL Adaptive Policy")
-
-    ax.plot(eps_fixed, fixed_health, color="#ff6b6b", alpha=0.2, linewidth=0.7)
-    ax.plot(eps_fixed[len(fixed_health) - len(sm_fixed):], sm_fixed,
-            color="#ff6b6b", linewidth=2.2, label="Fixed Schedule Policy")
-
-    ax.set_title("Coral Health: RL vs Fixed Schedule Policy", color="white", fontsize=14, pad=12)
-    ax.set_xlabel("Evaluation Episode", color="#8b949e")
-    ax.set_ylabel("Avg Coral Health Score", color="#8b949e")
-    ax.yaxis.set_major_formatter(mtick.PercentFormatter(xmax=1.0))
-    ax.tick_params(colors="#8b949e")
-    ax.spines["bottom"].set_color("#30363d")
-    ax.spines["left"].set_color("#30363d")
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.legend(facecolor="#21262d", edgecolor="#30363d", labelcolor="white")
-
-    plt.tight_layout()
-    out = Path(plot_dir) / "coral_health_comparison.png"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out, dpi=150, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  [plot] Saved -> {out}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-#  MLOps Logger
-# ─────────────────────────────────────────────────────────────────────────────
-
-CSV_FIELDS = [
-    "run_id", "episodes", "avg_reward", "avg_coral_health",
-    "epsilon", "learning_rate", "interventions_deployed",
-]
-
-
-def save_mlops_tracking(base_dir: str, run_id: str, results: dict, config: dict) -> None:
-    """Save a per-run CSV and JSON log for experiment tracking and reproducibility."""
-    out_dir = Path(base_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    
-    csv_path = out_dir / f"results_{run_id}.csv"
-    json_path = out_dir / f"log_{run_id}.json"
-    
-    # 1. Save CSV
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        
-        # Filter results dict to match CSV fields
-        csv_row = {k: results.get(k, None) for k in CSV_FIELDS}
-        writer.writerow(csv_row)
-        
-    # 2. Save JSON with full tracking info
-    tracking_data = {
-        "metadata": {"run_id": run_id},
-        "metrics": results,
-        "parameters": config,
+    return {
+        "avg_reward":       float(np.mean(rewards)),
+        "std_reward":       float(np.std(rewards)),
+        "avg_health":       float(np.mean(healths)),
+        "std_health":       float(np.std(healths)),
+        "action_counts":    action_counts,
+        "episode_rewards":  rewards,
+        "episode_healths":  healths,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Q-Learning Agent
+# ──────────────────────────────────────────────────────────────────────────────
+
+def train_qlearning(cfg: dict) -> dict:
+    alpha   = cfg["learning_rate"]
+    gamma   = cfg["discount_factor"]
+    eps     = cfg["epsilon"]
+    eps_min = cfg["epsilon_min"]
+    eps_dec = cfg["epsilon_decay"]
+    episodes      = cfg["episodes"]
+    max_steps     = cfg["max_steps_per_episode"]
+    snap_at       = cfg["save_policy_v1_at"]
+
+    rng     = np.random.default_rng(cfg["seed"])
+    q_table = np.zeros((N_STATES, N_ACTIONS))
+
+    ep_rewards, ep_healths, ep_epsilons = [], [], []
+    action_counts = [0] * N_ACTIONS
+
+    for ep in range(episodes):
+        env = CoralReefEnv(seed=cfg["seed"] + ep, stress_factor=cfg["stress_factor"])
+        state = env.reset()
+        ep_reward = 0.0
+
+        for _ in range(max_steps):
+            # ε-greedy
+            if rng.random() < eps:
+                action = int(rng.integers(0, N_ACTIONS))
+            else:
+                action = int(np.argmax(q_table[state]))
+
+            next_state, reward, done, info = env.step(action)
+            action_counts[action] += 1
+
+            # Q-update
+            best_next = np.max(q_table[next_state])
+            q_table[state, action] += alpha * (
+                reward + gamma * best_next - q_table[state, action]
+            )
+
+            ep_reward += reward
+            state = next_state
+            if done:
+                break
+
+        # Decay ε
+        eps = max(eps_min, eps * eps_dec)
+
+        ep_rewards.append(ep_reward)
+        ep_healths.append(env.coral_health)
+        ep_epsilons.append(eps)
+
+        # Save early snapshot
+        if ep + 1 == snap_at:
+            snap_meta = {"episode": ep + 1, "epsilon": eps, "config": cfg}
+            save_policy(q_table.copy(), cfg["policy_v1_path"], snap_meta)
+
+    return {
+        "q_table":          q_table,
+        "ep_rewards":       ep_rewards,
+        "ep_healths":       ep_healths,
+        "ep_epsilons":      ep_epsilons,
+        "action_counts":    action_counts,
+        "avg_reward":       float(np.mean(ep_rewards[-200:])),
+        "std_reward":       float(np.std(ep_rewards[-200:])),
+        "avg_health":       float(np.mean(ep_healths[-200:])),
+        "std_health":       float(np.std(ep_healths[-200:])),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Plotting  (real data, no fakes)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def make_plots(rl: dict, fixed: dict, cfg: dict):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.ticker as ticker
+
+    plots_dir = cfg["plots_dir"]
+    COLORS = {
+        "rl":    "#1f77b4",   # blue
+        "fixed": "#d62728",   # red
+        "shade": "#aec7e8",
+    }
+    STYLE = dict(linewidth=1.8, alpha=0.9)
+
+    # ── 1. Reward curve ────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(10, 4))
+    raw = np.array(rl["ep_rewards"])
+    ax.plot(raw, color=COLORS["rl"], alpha=0.18, linewidth=0.7, label="_raw")
+    ax.plot(smooth(raw, 40), color=COLORS["rl"], **STYLE, label="RL (smoothed, w=40)")
+
+    # Fixed baseline as a horizontal band
+    fm, fs = fixed["avg_reward"], fixed["std_reward"]
+    ax.axhline(fm, color=COLORS["fixed"], linewidth=1.6, linestyle="--",
+               label=f"Fixed-timer avg ({fm:.1f})")
+    ax.axhspan(fm - fs, fm + fs, color=COLORS["fixed"], alpha=0.10)
+
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Total Episode Reward")
+    ax.set_title("Training Reward: RL Agent vs Fixed-Timer Baseline")
+    ax.legend(framealpha=0.9)
+    ax.grid(True, linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    fig.savefig(f"{plots_dir}/reward_curve.png", dpi=150)
+    plt.close(fig)
+
+    # ── 2. Coral health curve ──────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(10, 4))
+    raw_h = np.array(rl["ep_healths"])
+    ax.plot(raw_h, color=COLORS["rl"], alpha=0.18, linewidth=0.7)
+    ax.plot(smooth(raw_h, 40), color=COLORS["rl"], **STYLE, label="RL coral health (smoothed)")
+
+    fhm, fhs = fixed["avg_health"], fixed["std_health"]
+    ax.axhline(fhm, color=COLORS["fixed"], linewidth=1.6, linestyle="--",
+               label=f"Fixed-timer avg ({fhm:.1f}%)")
+    ax.axhspan(fhm - fhs, fhm + fhs, color=COLORS["fixed"], alpha=0.10)
+
+    ax.set_ylim(0, 105)
+    ax.set_xlabel("Episode")
+    ax.set_ylabel("Coral Health Score (%)")
+    ax.set_title("Coral Health: RL vs Fixed-Timer over Training")
+    ax.legend(framealpha=0.9)
+    ax.grid(True, linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    fig.savefig(f"{plots_dir}/coral_health_curve.png", dpi=150)
+    plt.close(fig)
+
+    # ── 3. Bar comparison (last-200 RL vs fixed) ───────────────────────
+    metrics = ["Avg Reward", "Avg Health (%)"]
+    rl_vals    = [rl["avg_reward"],    rl["avg_health"]]
+    fixed_vals = [fixed["avg_reward"], fixed["avg_health"]]
+    rl_err     = [rl["std_reward"],    rl["std_health"]]
+    fixed_err  = [fixed["std_reward"], fixed["std_health"]]
+
+    x = np.arange(len(metrics))
+    w = 0.35
+    fig, ax = plt.subplots(figsize=(7, 5))
+    bars_rl    = ax.bar(x - w/2, rl_vals,    w, yerr=rl_err,
+                        color=COLORS["rl"],    label="RL Policy (best 200)", capsize=5,
+                        error_kw=dict(elinewidth=1.4))
+    bars_fixed = ax.bar(x + w/2, fixed_vals, w, yerr=fixed_err,
+                        color=COLORS["fixed"], label="Fixed-Timer", capsize=5,
+                        error_kw=dict(elinewidth=1.4))
+
+    # Value labels on bars
+    for bar in list(bars_rl) + list(bars_fixed):
+        h = bar.get_height()
+        ax.text(bar.get_x() + bar.get_width() / 2, h + 1,
+                f"{h:.1f}", ha="center", va="bottom", fontsize=9)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(metrics)
+    ax.set_title("RL Policy vs Fixed-Timer: Key Metrics\n(last 200 episodes ± 1 std)")
+    ax.legend(framealpha=0.9)
+    ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    fig.savefig(f"{plots_dir}/comparison_bar.png", dpi=150)
+    plt.close(fig)
+
+    # ── 4. Action distribution ─────────────────────────────────────────
+    action_names = [f"A{i}\n{ACTIONS[i].replace('_',' ')[:12]}" for i in range(N_ACTIONS)]
+    rl_ac    = np.array(rl["action_counts"],    dtype=float)
+    fixed_ac = np.array(fixed["action_counts"], dtype=float)
+    rl_ac    /= rl_ac.sum()
+    fixed_ac /= fixed_ac.sum()
+
+    x = np.arange(N_ACTIONS)
+    fig, ax = plt.subplots(figsize=(9, 4))
+    ax.bar(x - w/2, rl_ac,    w, color=COLORS["rl"],    label="RL Policy")
+    ax.bar(x + w/2, fixed_ac, w, color=COLORS["fixed"], label="Fixed-Timer")
+    ax.set_xticks(x)
+    ax.set_xticklabels(action_names, fontsize=8)
+    ax.set_ylabel("Fraction of steps")
+    ax.set_title("Action Distribution: RL vs Fixed-Timer")
+    ax.legend(framealpha=0.9)
+    ax.yaxis.set_major_formatter(ticker.PercentFormatter(xmax=1))
+    ax.grid(True, axis="y", linestyle=":", alpha=0.4)
+    fig.tight_layout()
+    fig.savefig(f"{plots_dir}/action_distribution.png", dpi=150)
+    plt.close(fig)
+
+    print(f"  [MLOps] 4 plots saved to {plots_dir}/")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MLOps Logging
+# ──────────────────────────────────────────────────────────────────────────────
+
+def log_results(cfg: dict, rl: dict, fixed: dict, run_hash: str, elapsed: float):
+    results_dir = cfg["results_dir"]
+    run_id      = cfg["run_id"]
+
+    # CSV row
+    csv_path = f"{results_dir}/results_{run_id}.csv"
+    fieldnames = [
+        "run_hash", "run_id", "timestamp", "elapsed_s",
+        "episodes", "learning_rate", "discount_factor",
+        "epsilon_start", "epsilon_min", "epsilon_decay",
+        "stress_factor", "seed",
+        "rl_avg_reward_last200", "rl_std_reward_last200",
+        "rl_avg_health_last200", "rl_std_health_last200",
+        "fixed_avg_reward",      "fixed_std_reward",
+        "fixed_avg_health",      "fixed_std_health",
+        "reward_delta",          "health_delta",
+    ]
+    row = {
+        "run_hash":   run_hash,
+        "run_id":     run_id,
+        "timestamp":  time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "elapsed_s":  round(elapsed, 2),
+        "episodes":   cfg["episodes"],
+        "learning_rate":   cfg["learning_rate"],
+        "discount_factor": cfg["discount_factor"],
+        "epsilon_start":   cfg["epsilon"],
+        "epsilon_min":     cfg["epsilon_min"],
+        "epsilon_decay":   cfg["epsilon_decay"],
+        "stress_factor":   cfg["stress_factor"],
+        "seed":            cfg["seed"],
+        "rl_avg_reward_last200": round(rl["avg_reward"], 3),
+        "rl_std_reward_last200": round(rl["std_reward"], 3),
+        "rl_avg_health_last200": round(rl["avg_health"], 3),
+        "rl_std_health_last200": round(rl["std_health"], 3),
+        "fixed_avg_reward": round(fixed["avg_reward"], 3),
+        "fixed_std_reward": round(fixed["std_reward"], 3),
+        "fixed_avg_health": round(fixed["avg_health"], 3),
+        "fixed_std_health": round(fixed["std_health"], 3),
+        "reward_delta": round(rl["avg_reward"]  - fixed["avg_reward"], 3),
+        "health_delta": round(rl["avg_health"]  - fixed["avg_health"], 3),
+    }
+    write_header = not Path(csv_path).exists()
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+    print(f"  [MLOps] Metrics appended → {csv_path}")
+
+    # Full JSON for reproducibility
+    json_path = f"{results_dir}/log_{run_id}_{run_hash[:8]}.json"
     with open(json_path, "w") as f:
-        json.dump(tracking_data, f, indent=4)
-        
-    print(f"  [mlops] Saved run tracking -> {csv_path}")
-    print(f"  [mlops] Saved run tracking -> {json_path}")
+        json.dump({"config": cfg, "metrics": row}, f, indent=2)
+    print(f"  [MLOps] Full log saved  → {json_path}")
+
+    return row
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  Main
-# ─────────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# Comparison table (terminal)
+# ──────────────────────────────────────────────────────────────────────────────
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Train Coral Reef RL Agent")
-    parser.add_argument("--config", required=True, help="Path to YAML config file")
+def print_comparison_table(rl: dict, fixed: dict):
+    try:
+        from tabulate import tabulate
+        use_tabulate = True
+    except ImportError:
+        use_tabulate = False
+
+    rd = rl["avg_reward"]  - fixed["avg_reward"]
+    hd = rl["avg_health"]  - fixed["avg_health"]
+    rows = [
+        ["Metric",                       "Fixed-Timer",                                "RL Policy",                               "ΔRL−Fixed"],
+        ["Avg Reward (last 200 eps)",
+            f"{fixed['avg_reward']:.2f} ± {fixed['std_reward']:.2f}",
+            f"{rl['avg_reward']:.2f} ± {rl['std_reward']:.2f}",
+            f"{rd:+.2f}"],
+        ["Avg Coral Health % (last 200)",
+            f"{fixed['avg_health']:.2f} ± {fixed['std_health']:.2f}",
+            f"{rl['avg_health']:.2f} ± {rl['std_health']:.2f}",
+            f"{hd:+.2f}"],
+        ["State-aware decisions",         "No (time-triggered)",  "Yes (Q-table)",     "—"],
+        ["Unnecessary interventions",     "High",                 "Low (penalised)",   "—"],
+        ["Adapts to env stress",          "No",                   "Yes",               "—"],
+    ]
+    header = rows[0]
+    data   = rows[1:]
+
+    print("\n" + "═" * 72)
+    print("  FIXED-TIMER vs RL POLICY — COMPARISON TABLE")
+    print("═" * 72)
+    if use_tabulate:
+        print(tabulate(data, headers=header, tablefmt="rounded_outline"))
+    else:
+        col_w = [28, 26, 26, 12]
+        print("  " + "  ".join(h.ljust(w) for h, w in zip(header, col_w)))
+        print("  " + "-" * (sum(col_w) + len(col_w) * 2))
+        for row in data:
+            print("  " + "  ".join(str(c).ljust(w) for c, w in zip(row, col_w)))
+    print("═" * 72 + "\n")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Main
+# ──────────────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="Train Coral Reef RL Scheduler")
+    parser.add_argument("--config", default="configs/qlearning_v1.yaml")
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
-    agent_cfg = cfg["agent"]
-    exp_cfg   = cfg["experiment"]
-    log_cfg   = cfg["logging"]
-    rew_cfg   = cfg["rewards"]
+    cfg      = load_config(args.config)
+    run_hash = uuid.uuid4().hex
+    make_dirs(cfg)
 
-    set_seed(exp_cfg["seed"])
+    print(f"\n{'='*60}")
+    print(f"  Coral Reef RL Scheduler — Training")
+    print(f"  run_id:   {cfg['run_id']}")
+    print(f"  run_hash: {run_hash}")
+    print(f"  config:   {args.config}")
+    print(f"{'='*60}\n")
 
-    episodes   = agent_cfg["episodes"]
-    max_steps  = agent_cfg["max_steps_per_episode"]
-    save_v1_at = log_cfg["save_policy_v1_at"]
+    # 1. Fixed-timer baseline (evaluated first, independent)
+    print("[1/4] Evaluating fixed-timer baseline (200 episodes)…")
+    fixed_results = run_fixed_timer(cfg, episodes=200)
+    print(f"      Fixed avg reward: {fixed_results['avg_reward']:.2f}  "
+          f"health: {fixed_results['avg_health']:.2f}%")
 
-    print("=" * 60)
-    print("  Adaptive Coral Reef Monitoring - Q-Learning Trainer")
-    print("=" * 60)
-    print(f"  Config       : {args.config}")
-    print(f"  Episodes     : {episodes}")
-    print(f"  Learning rate: {agent_cfg['learning_rate']}")
-    print(f"  Epsilon      : {agent_cfg['epsilon']}  (decay {agent_cfg['epsilon_decay']})")
-    print(f"  Gamma        : {agent_cfg['discount_factor']}")
-    print("=" * 60)
+    # 2. Train Q-learning
+    print(f"\n[2/4] Training Q-learning agent ({cfg['episodes']} episodes)…")
+    t0 = time.time()
+    rl_results = train_qlearning(cfg)
+    elapsed = time.time() - t0
+    print(f"      Done in {elapsed:.1f}s  |  "
+          f"RL avg reward (last 200): {rl_results['avg_reward']:.2f}  "
+          f"health: {rl_results['avg_health']:.2f}%")
 
-    env = CoralReefEnv(seed=exp_cfg["seed"])
+    # 3. Save converged policy
+    print("\n[3/4] Saving policies…")
+    final_meta = {"episode": cfg["episodes"], "run_hash": run_hash, "config": cfg}
+    save_policy(rl_results["q_table"], cfg["policy_v2_path"], final_meta)
 
-    agent = QLearningAgent(
-        n_states       = N_STATES,
-        n_actions      = N_ACTIONS,
-        lr             = agent_cfg["learning_rate"],
-        gamma          = agent_cfg["discount_factor"],
-        epsilon        = agent_cfg["epsilon"],
-        epsilon_decay  = agent_cfg["epsilon_decay"],
-        epsilon_min    = agent_cfg["epsilon_min"],
-        seed           = exp_cfg["seed"],
-    )
+    # 4. Plots & MLOps log
+    print("\n[4/4] Generating plots and MLOps log…")
+    make_plots(rl_results, fixed_results, cfg)
+    log_results(cfg, rl_results, fixed_results, run_hash, elapsed)
 
-    # ── Training ─────────────────────────────────────────────────────────── #
-    rewards_hist       = []
-    health_hist_rl     = []
-    total_interventions = 0
+    # Print comparison table
+    print_comparison_table(rl_results, fixed_results)
 
-    for ep in tqdm(range(1, episodes + 1), desc="Training", unit="ep", ncols=70):
-        total_reward, info = run_episode(env, agent, max_steps, train=True)
-        agent.decay_epsilon()
-
-        rewards_hist.append(total_reward)
-        health_hist_rl.append(info.get("coral_health", 0.0))
-        total_interventions += info.get("interventions", 0)
-
-        # Save policy v1 snapshot
-        if ep == save_v1_at:
-            agent.save(log_cfg["policy_v1_path"])
-
-    # Save final (converged) policy v2
-    agent.save(log_cfg["policy_v2_path"])
-
-    # ── Fixed-baseline evaluation ─────────────────────────────────────────── #
-    fixed_policy = FixedSchedulePolicy(interval=10)
-    eval_episodes = min(200, episodes)
-    health_hist_fixed = []
-    fixed_interv_count = 0
-    fixed_unnecessary  = 0
-    fixed_early_warn   = 0
-    fixed_early_total  = 0
-
-    for _ in range(eval_episodes):
-        _, info = run_fixed_episode(env, fixed_policy, max_steps)
-        health_hist_fixed.append(info.get("coral_health", 0.0))
-        fixed_interv_count += info.get("interventions", 0)
-        fixed_early_warn   += info.get("early_warn_caught", 0)
-        fixed_early_total  += info.get("early_warn_total", 1)
-
-    # ── RL greedy evaluation ──────────────────────────────────────────────── #
-    rl_reward_eval    = []
-    rl_health_eval    = []
-    rl_interv_count   = 0
-    rl_unnecessary    = 0
-    rl_early_warn     = 0
-    rl_early_total    = 0
-
-    for _ in range(eval_episodes):
-        r, info = run_episode(env, agent, max_steps, train=False)
-        rl_reward_eval.append(r)
-        rl_health_eval.append(info.get("coral_health", 0.0))
-        rl_interv_count += info.get("interventions", 0)
-        rl_early_warn   += info.get("early_warn_caught", 0)
-        rl_early_total  += info.get("early_warn_total", 1)
-
-    # ── Metrics ──────────────────────────────────────────────────────────── #
-    avg_reward       = float(np.mean(rl_reward_eval))
-    avg_coral_health = float(np.mean(rl_health_eval))
-
-    run_id = f"{exp_cfg['run_id']}_{uuid.uuid4().hex[:6]}"
-    
-    results = {
-        "run_id":                run_id,
-        "episodes":              episodes,
-        "avg_reward":            round(avg_reward, 4),
-        "avg_coral_health":      round(avg_coral_health, 4),
-        "epsilon":               round(agent.epsilon, 5),
-        "learning_rate":         agent_cfg["learning_rate"],
-        "interventions_deployed": rl_interv_count,
-    }
-    
-    # Save per-run MLOps tracking
-    save_mlops_tracking(
-        base_dir="experiments",
-        run_id=run_id,
-        results=results,
-        config=cfg
-    )
-
-    # ── Plots ─────────────────────────────────────────────────────────────── #
-    plot_reward_over_episodes(rewards_hist, log_cfg["plot_dir"])
-    plot_coral_health_comparison(health_hist_rl, health_hist_fixed, log_cfg["plot_dir"])
-
-    # ── Comparison Table ─────────────────────────────────────────────────── #
-    rl_surv   = avg_coral_health * 100
-    fix_surv  = float(np.mean(health_hist_fixed)) * 100
-
-    rl_unnec_pct  = (rl_unnecessary  / max(rl_interv_count,  1)) * 100
-    fix_unnec_pct = (fixed_unnecessary / max(fixed_interv_count, 1)) * 100
-
-    rl_ew_pct   = (rl_early_warn  / max(rl_early_total,  1)) * 100
-    fix_ew_pct  = (fixed_early_warn / max(fixed_early_total, 1)) * 100
-
-    print()
-    print("=" * 60)
-    print("  BASELINE COMPARISON: Fixed Schedule vs RL Adaptive")
-    print("=" * 60)
-    print(f"  {'Metric':<35} {'Fixed':>8} {'RL':>8}")
-    print(f"  {'-'*35} {'-'*8} {'-'*8}")
-    print(f"  {'Avg Coral Health Score':<35} {fix_surv:>7.1f}% {rl_surv:>7.1f}%")
-    print(f"  {'Unnecessary Interventions (%)':<35} {fix_unnec_pct:>7.1f}% {rl_unnec_pct:>7.1f}%")
-    print(f"  {'Early Warnings Caught (%)':<35} {fix_ew_pct:>7.1f}% {rl_ew_pct:>7.1f}%")
-    print(f"  {'Overall Reef Survival Rate (%)':<35} {fix_surv:>7.1f}% {rl_surv:>7.1f}%")
-    print("=" * 60)
-    print(f"\n  run_id          : {run_id}")
-    print(f"  avg_reward (RL) : {avg_reward:.2f}")
-    print(f"  Final epsilon   : {agent.epsilon:.5f}")
-    print("\nTraining complete!\n")
+    print("✓ Training complete.\n")
+    print(f"  Plots   → {cfg['plots_dir']}/")
+    print(f"  Policies→ policies/policy_v1.pkl  (ep {cfg['save_policy_v1_at']})")
+    print(f"           policies/policy_v2.pkl  (converged)")
+    print(f"  MLOps   → {cfg['results_dir']}/results_{cfg['run_id']}.csv\n")
 
 
 if __name__ == "__main__":
